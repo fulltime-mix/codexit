@@ -1,0 +1,79 @@
+{
+  "name": "codexit",
+  "version": "1.0.0",
+  "description": "A small macOS utility for switching local Codex ChatGPT accounts.",
+  "main": "src/main.js",
+  "license": "MIT",
+  "author": "Peng Zhangbo",
+  "private": true,
+  "keywords": [
+    "codex",
+    "electron",
+    "macos",
+    "oauth",
+    "account-switcher"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "electron .",
+    "lint": "node --check src/main.js && node --check src/preload.js && node --check src/renderer.js",
+    "smoke": "electron . --smoke-test",
+    "audit": "npm audit --audit-level=high",
+    "verify": "npm run lint && npm run smoke && npm run audit",
+    "build": "electron-builder --mac dmg --arm64",
+    "build:dir": "electron-builder --mac dir --arm64"
+  },
+  "overrides": {
+    "tmp": "^0.2.7"
+  },
+  "build": {
+    "appId": "com.codexit.switcher",
+    "productName": "Codexit",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "icon": "build/icon.icns",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ]
+    },
+    "dmg": {
+      "artifactName": "codexit.${ext}",
+      "window": {
+        "width": 540,
+        "height": 380
+      },
+      "contents": [
+        {
+          "x": 140,
+          "y": 180,
+          "type": "file"
+        },
+        {
+          "x": 400,
+          "y": 180,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ]
+    }
+  },
+  "devDependencies": {
+    "electron": "^39.2.7",
+    "electron-builder": "^26.0.12"
+  }
+}
