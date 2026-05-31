@@ -10,6 +10,7 @@ Codexit is unofficial and is not affiliated with OpenAI.
 ## Features
 
 - Add or reauth ChatGPT accounts through an isolated OAuth window.
+- Use the macOS menu bar icon to view cached quota and switch accounts quickly.
 - Store account tokens in the macOS Keychain.
 - Show 5-hour and weekly usage windows when the usage endpoint is available.
 - Switch the active Codex account and restart Codex from one place.

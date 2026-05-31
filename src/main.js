@@ -2,9 +2,12 @@ const {
   app,
   BrowserWindow,
   ipcMain,
+  Menu,
+  nativeImage,
   net,
   session,
-  shell
+  shell,
+  Tray
 } = require("electron");
 const crypto = require("crypto");
 const fs = require("fs");
@@ -35,6 +38,9 @@ const APP_BACKGROUND = "#f4f1ea";
 
 let mainWindow = null;
 let pendingOAuth = null;
+let tray = null;
+let trayBusyLabel = null;
+let trayLastError = null;
 
 app.setName("Codexit");
 
@@ -48,6 +54,14 @@ function appIconPath() {
     return packagedIcon;
   }
   return path.join(__dirname, "..", "build", "icon.icns");
+}
+
+function assetPath(fileName) {
+  return path.join(__dirname, "assets", fileName);
+}
+
+function trayIconPath() {
+  return assetPath("menu-bar-template.png");
 }
 
 function createWindow() {
@@ -66,7 +80,21 @@ function createWindow() {
     }
   });
 
+  mainWindow.on("closed", () => {
+    mainWindow = null;
+  });
+
   mainWindow.loadFile(path.join(__dirname, "index.html"));
+  return mainWindow;
+}
+
+function showMainWindow() {
+  const window = mainWindow && !mainWindow.isDestroyed() ? mainWindow : createWindow();
+  if (window.isMinimized()) {
+    window.restore();
+  }
+  window.show();
+  window.focus();
 }
 
 app.whenReady().then(() => {
@@ -76,10 +104,9 @@ app.whenReady().then(() => {
     return;
   }
   createWindow();
+  createTray();
   app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow();
-    }
+    showMainWindow();
   });
 });
 
@@ -1147,12 +1174,194 @@ function formatError(error) {
   return error.message || String(error);
 }
 
+function truncateMenuText(value, maxLength = 72) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
+}
+
+function trayQuotaValue(account, key) {
+  const windowInfo = account.quota?.[key];
+  if (!windowInfo || windowInfo.remainingPercent === null) {
+    return "-";
+  }
+  const remaining = Math.round(
+    Math.max(0, Math.min(100, windowInfo.remainingPercent))
+  );
+  return `${remaining}%`;
+}
+
+function trayAccountSublabel(account) {
+  const error = account.reauthReason || account.quotaError?.message;
+  if (error) {
+    return `需处理 · ${truncateMenuText(error, 44)}`;
+  }
+  return `5 小时 ${trayQuotaValue(account, "fiveHour")} · 周额度 ${trayQuotaValue(
+    account,
+    "weekly"
+  )}`;
+}
+
+function refreshTrayMenu() {
+  if (!tray) {
+    return;
+  }
+
+  const accounts = listAccounts();
+  const current = accounts.find((account) => account.isCurrent);
+  const hasAccounts = accounts.length > 0;
+  const accountItems = hasAccounts
+    ? accounts.map((account) => ({
+        label: account.email,
+        sublabel: trayAccountSublabel(account),
+        type: "checkbox",
+        checked: Boolean(account.isCurrent),
+        enabled: !trayBusyLabel,
+        click: () => {
+          if (account.isCurrent) {
+            return;
+          }
+          runTrayTask(`正在切换到 ${account.email}...`, () =>
+            switchAccount(account.id)
+          );
+        }
+      }))
+    : [
+        {
+          label: "还没有账号",
+          sublabel: "打开主窗口添加账号",
+          enabled: false
+        }
+      ];
+
+  const template = [
+    {
+      label: trayBusyLabel || `当前：${current?.email || "未切换"}`,
+      enabled: false
+    },
+    {
+      label: hasAccounts
+        ? `额度：5 小时 ${trayQuotaValue(current || {}, "fiveHour")} · 周额度 ${trayQuotaValue(
+            current || {},
+            "weekly"
+          )}`
+        : "额度：暂无账号",
+      enabled: false
+    },
+    ...(trayLastError
+      ? [
+          { type: "separator" },
+          {
+            label: `上次错误：${truncateMenuText(trayLastError)}`,
+            enabled: false
+          }
+        ]
+      : []),
+    { type: "separator" },
+    {
+      label: "切换账号",
+      enabled: hasAccounts && !trayBusyLabel,
+      submenu: accountItems
+    },
+    {
+      label: "刷新全部额度",
+      enabled: hasAccounts && !trayBusyLabel,
+      click: () => runTrayTask("正在刷新全部额度...", refreshAllAccountsFromTray)
+    },
+    { type: "separator" },
+    {
+      label: "打开 Codexit",
+      click: showMainWindow
+    },
+    {
+      label: "打开 Codex 目录",
+      click: () => runTrayTask("正在打开 Codex 目录...", openCodexHome)
+    },
+    { type: "separator" },
+    {
+      label: "退出 Codexit",
+      role: "quit"
+    }
+  ];
+
+  tray.setToolTip(`Codexit · 当前：${current?.email || "未切换"}`);
+  tray.setContextMenu(Menu.buildFromTemplate(template));
+}
+
+function runTrayTask(label, task) {
+  if (trayBusyLabel) {
+    return;
+  }
+  trayBusyLabel = label;
+  trayLastError = null;
+  refreshTrayMenu();
+
+  Promise.resolve()
+    .then(task)
+    .catch((error) => {
+      trayLastError = formatError(error);
+    })
+    .finally(() => {
+      trayBusyLabel = null;
+      refreshTrayMenu();
+    });
+}
+
+async function refreshAllAccountsFromTray() {
+  const accounts = listAccounts();
+  let failedCount = 0;
+  for (const account of accounts) {
+    try {
+      await refreshQuota(account.id);
+    } catch {
+      failedCount += 1;
+    }
+  }
+  if (failedCount > 0) {
+    throw new Error(`${failedCount} 个账号刷新失败，请打开 Codexit 查看详情`);
+  }
+}
+
+function createTray() {
+  if (tray) {
+    return;
+  }
+
+  const source = nativeImage.createFromPath(trayIconPath());
+  const image = (source.isEmpty()
+    ? nativeImage.createFromPath(appIconPath())
+    : source
+  ).resize({ width: 21, height: 21 });
+  image.setTemplateImage(true);
+
+  tray = new Tray(image);
+  tray.on("click", refreshTrayMenu);
+  refreshTrayMenu();
+}
+
+async function openCodexHome() {
+  fs.mkdirSync(codexHome(), { recursive: true });
+  await shell.openPath(codexHome());
+  return true;
+}
+
 ipcMain.handle("accounts:list", async () => listAccounts());
 ipcMain.handle("oauth:start", async () => startOAuth());
 ipcMain.handle("oauth:reauth", async (_event, accountId) => startOAuthReauth(accountId));
-ipcMain.handle("oauth:complete", async (_event, loginId) => completeOAuth(loginId));
-ipcMain.handle("quota:refresh", async (_event, accountId) => refreshQuota(accountId));
-ipcMain.handle("account:switch", async (_event, accountId) => switchAccount(accountId));
+ipcMain.handle("oauth:complete", async (_event, loginId) => {
+  const account = await completeOAuth(loginId);
+  refreshTrayMenu();
+  return account;
+});
+ipcMain.handle("quota:refresh", async (_event, accountId) => {
+  const quota = await refreshQuota(accountId);
+  refreshTrayMenu();
+  return quota;
+});
+ipcMain.handle("account:switch", async (_event, accountId) => {
+  const result = await switchAccount(accountId);
+  refreshTrayMenu();
+  return result;
+});
 ipcMain.handle("account:delete", async (_event, accountId) => {
   const store = loadStore();
   store.accounts = store.accounts.filter((account) => account.id !== accountId);
@@ -1161,10 +1370,7 @@ ipcMain.handle("account:delete", async (_event, accountId) => {
   }
   saveStore(store);
   await keychainDelete(ACCOUNT_TOKEN_SERVICE, accountId);
+  refreshTrayMenu();
   return true;
 });
-ipcMain.handle("codex:open-home", async () => {
-  fs.mkdirSync(codexHome(), { recursive: true });
-  await shell.openPath(codexHome());
-  return true;
-});
+ipcMain.handle("codex:open-home", async () => openCodexHome());
