@@ -41,6 +41,7 @@ let pendingOAuth = null;
 let tray = null;
 let trayBusyLabel = null;
 let trayLastError = null;
+let isQuitting = false;
 
 app.setName("Codexit");
 
@@ -80,6 +81,14 @@ function createWindow() {
     }
   });
 
+  mainWindow.on("close", (event) => {
+    if (isQuitting) {
+      return;
+    }
+    event.preventDefault();
+    mainWindow.hide();
+  });
+
   mainWindow.on("closed", () => {
     mainWindow = null;
   });
@@ -94,6 +103,9 @@ function showMainWindow() {
     window.restore();
   }
   window.show();
+  if (process.platform === "darwin") {
+    app.focus({ steal: true });
+  }
   window.focus();
 }
 
@@ -103,11 +115,17 @@ app.whenReady().then(() => {
     app.quit();
     return;
   }
-  createWindow();
+  if (process.platform === "darwin" && app.dock) {
+    app.dock.hide();
+  }
   createTray();
   app.on("activate", () => {
     showMainWindow();
   });
+});
+
+app.on("before-quit", () => {
+  isQuitting = true;
 });
 
 app.on("window-all-closed", () => {
