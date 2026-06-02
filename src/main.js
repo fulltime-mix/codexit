@@ -1100,6 +1100,12 @@ function trayAccountSublabel(account) {
   )}`;
 }
 
+function sortTrayAccounts(accounts) {
+  const current = accounts.find((account) => account.isCurrent);
+  const rest = accounts.filter((account) => !account.isCurrent);
+  return current ? [current, ...rest] : rest;
+}
+
 function refreshTrayMenu() {
   if (!tray) {
     return;
@@ -1109,7 +1115,7 @@ function refreshTrayMenu() {
   const current = accounts.find((account) => account.isCurrent);
   const hasAccounts = accounts.length > 0;
   const accountItems = hasAccounts
-    ? accounts.map((account) => ({
+    ? sortTrayAccounts(accounts).map((account) => ({
         label: account.email,
         sublabel: trayAccountSublabel(account),
         type: "checkbox",
@@ -1131,54 +1137,46 @@ function refreshTrayMenu() {
           enabled: false
         }
       ];
+  const busyItems = trayBusyLabel
+    ? [
+        {
+          label: trayBusyLabel,
+          enabled: false
+        },
+        { type: "separator" }
+      ]
+    : [];
 
   const template = [
-    {
-      label: trayBusyLabel || `当前：${current?.email || "未切换"}`,
-      enabled: false
-    },
-    {
-      label: hasAccounts
-        ? `额度：5 小时 ${trayQuotaValue(current || {}, "fiveHour")} · 周额度 ${trayQuotaValue(
-            current || {},
-            "weekly"
-          )}`
-        : "额度：暂无账号",
-      enabled: false
-    },
+    ...busyItems,
     ...(trayLastError
       ? [
-          { type: "separator" },
           {
             label: `上次错误：${truncateMenuText(trayLastError)}`,
             enabled: false
-          }
+          },
+          { type: "separator" }
         ]
       : []),
+    ...accountItems,
     { type: "separator" },
     {
-      label: "切换账号",
+      label: "刷新额度",
       enabled: hasAccounts && !trayBusyLabel,
-      submenu: accountItems
-    },
-    {
-      label: "刷新全部额度",
-      enabled: hasAccounts && !trayBusyLabel,
-      click: () => runTrayTask("正在刷新全部额度...", refreshAllAccountsFromTray)
+      click: () => runTrayTask("正在刷新额度...", refreshAllAccountsFromTray)
     },
     { type: "separator" },
     {
       label: "打开 Codexit",
       click: showMainWindow
     },
-    {
-      label: "打开 Codex 目录",
-      click: () => runTrayTask("正在打开 Codex 目录...", openCodexHome)
-    },
     { type: "separator" },
     {
       label: "退出 Codexit",
-      role: "quit"
+      click: () => {
+        isQuitting = true;
+        app.quit();
+      }
     }
   ];
 
