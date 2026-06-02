@@ -15,6 +15,12 @@ const http = require("http");
 const os = require("os");
 const path = require("path");
 const { execFile } = require("child_process");
+const {
+  AccountAuthCoordinator,
+  buildAccountId,
+  extractIdentity,
+  sha256
+} = require("./auth-coordinator");
 
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const AUTH_ENDPOINT = "https://auth.openai.com/oauth/authorize";
@@ -25,7 +31,6 @@ const ORIGINATOR = "codex_vscode";
 const CALLBACK_PORT = 1455;
 const CALLBACK_PATH = "/auth/callback";
 const OAUTH_TIMEOUT_MS = 5 * 60 * 1000;
-const TOKEN_REFRESH_SKEW_SECONDS = 300;
 const REQUEST_TIMEOUT_MS = 20 * 1000;
 const USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 const CHATGPT_REFERER = "https://chatgpt.com/";
@@ -236,10 +241,6 @@ function saveStore(store) {
   writeJsonAtomic(storePath(), store);
 }
 
-function sha256(value) {
-  return crypto.createHash("sha256").update(value).digest("hex");
-}
-
 function base64Url(bytes) {
   return Buffer.from(bytes).toString("base64url");
 }
@@ -250,93 +251,6 @@ function randomToken() {
 
 function buildCodeChallenge(verifier) {
   return base64Url(crypto.createHash("sha256").update(verifier).digest());
-}
-
-function decodeJwtPayload(token) {
-  try {
-    const part = String(token || "").split(".")[1];
-    if (!part) {
-      return null;
-    }
-    return JSON.parse(Buffer.from(part, "base64url").toString("utf8"));
-  } catch {
-    return null;
-  }
-}
-
-function firstString(...values) {
-  for (const value of values) {
-    if (typeof value === "string" && value.trim()) {
-      return value.trim();
-    }
-  }
-  return null;
-}
-
-function normalizeScalar(value) {
-  if (typeof value === "string" && value.trim()) {
-    return value.trim();
-  }
-  if (typeof value === "number" || typeof value === "boolean") {
-    return String(value);
-  }
-  return null;
-}
-
-function extractIdentity(tokens) {
-  const idPayload = decodeJwtPayload(tokens.id_token) || {};
-  const accessPayload = decodeJwtPayload(tokens.access_token) || {};
-  const idAuth = idPayload["https://api.openai.com/auth"] || {};
-  const accessAuth = accessPayload["https://api.openai.com/auth"] || {};
-  const profile = idPayload["https://api.openai.com/profile"] || {};
-
-  const email = firstString(idPayload.email, profile.email, accessAuth.email, idAuth.email);
-  if (!email) {
-    throw new Error("OAuth 响应中缺少 email");
-  }
-
-  const planType = firstString(
-    accessAuth.chatgpt_plan_type,
-    idAuth.chatgpt_plan_type,
-    accessAuth.plan_type,
-    idAuth.plan_type
-  );
-  const subscriptionActiveUntil = normalizeScalar(
-    accessAuth.chatgpt_subscription_active_until ??
-      idAuth.chatgpt_subscription_active_until
-  );
-  const accountId = firstString(
-    tokens.account_id,
-    accessAuth.chatgpt_account_id,
-    accessAuth.account_id,
-    idAuth.chatgpt_account_id,
-    idAuth.account_id
-  );
-  const organizationId = firstString(
-    accessAuth.organization_id,
-    accessAuth.org_id,
-    idAuth.organization_id,
-    idAuth.org_id
-  );
-  const userId = firstString(accessAuth.chatgpt_user_id, idAuth.chatgpt_user_id, idPayload.sub);
-
-  return {
-    email,
-    userId,
-    planType,
-    subscriptionActiveUntil,
-    accountId,
-    organizationId
-  };
-}
-
-function buildAccountId(identity) {
-  const seed = [
-    identity.email.toLowerCase(),
-    identity.accountId || "",
-    identity.organizationId || ""
-  ].join("|");
-  return `codex_${sha256(seed).slice(0, 24)}`;
 }
 
 function sanitizeAccount(account, store) {
@@ -486,14 +400,6 @@ async function replaceAccountTokens(accountId, tokens) {
   return sanitizeAccount(account, store);
 }
 
-function isAccessTokenExpired(accessToken) {
-  const payload = decodeJwtPayload(accessToken);
-  if (!payload || typeof payload.exp !== "number") {
-    return true;
-  }
-  return payload.exp <= nowSeconds() + TOKEN_REFRESH_SKEW_SECONDS;
-}
-
 function formatFetchFailure(error) {
   const pieces = [error?.name, error?.message, error?.cause?.code, error?.cause?.message]
     .filter(Boolean)
@@ -586,28 +492,17 @@ async function refreshTokens(refreshToken, currentIdToken) {
   };
 }
 
-function applyIdentityToAccount(account, identity) {
-  account.email = identity.email;
-  account.userId = identity.userId;
-  account.planType = identity.planType || account.planType;
-  account.subscriptionActiveUntil =
-    identity.subscriptionActiveUntil || account.subscriptionActiveUntil;
-  account.accountId = identity.accountId || account.accountId;
-  account.organizationId = identity.organizationId || account.organizationId;
-  account.tokenUpdatedAt = nowSeconds();
-  account.requiresReauth = false;
-  account.reauthReason = null;
-}
-
-async function markReauthRequired(accountId, reason) {
-  const store = loadStore();
-  const account = store.accounts.find((item) => item.id === accountId);
-  if (account) {
-    account.requiresReauth = true;
-    account.reauthReason = reason;
-    saveStore(store);
-  }
-}
+const accountAuth = new AccountAuthCoordinator({
+  loadStore,
+  saveStore,
+  loadAccountTokens,
+  saveAccountTokens,
+  refreshTokens,
+  loadCodexAuthBundles,
+  saveCodexAuthBundle: writeCodexAuthBundle,
+  nowSeconds,
+  formatError
+});
 
 function saveQuotaError(accountId, error, code = null) {
   const store = loadStore();
@@ -624,44 +519,11 @@ function saveQuotaError(accountId, error, code = null) {
 }
 
 async function refreshStoredAccountTokens(accountId, reason) {
-  const store = loadStore();
-  const account = store.accounts.find((item) => item.id === accountId);
-  if (!account) {
-    throw new Error("账号不存在");
-  }
-
-  const tokens = await loadAccountTokens(accountId);
-  if (!tokens.refresh_token) {
-    const message = `${reason}: 缺少 refresh_token，请重新登录`;
-    await markReauthRequired(accountId, message);
-    throw new Error(message);
-  }
-
-  try {
-    const nextTokens = await refreshTokens(tokens.refresh_token, tokens.id_token);
-    const identity = extractIdentity(nextTokens);
-    applyIdentityToAccount(account, identity);
-    saveStore(store);
-    await saveAccountTokens(accountId, nextTokens);
-    return { account, tokens: nextTokens };
-  } catch (error) {
-    const message = `${reason}: 授权刷新失败，请重新登录。${formatError(error)}`;
-    await markReauthRequired(accountId, message);
-    throw new Error(message);
-  }
+  return accountAuth.refreshStoredAccountTokens(accountId, reason);
 }
 
 async function ensureFreshAccount(accountId) {
-  const store = loadStore();
-  const account = store.accounts.find((item) => item.id === accountId);
-  if (!account) {
-    throw new Error("账号不存在");
-  }
-  const tokens = await loadAccountTokens(accountId);
-  if (!isAccessTokenExpired(tokens.access_token)) {
-    return { account, tokens };
-  }
-  return refreshStoredAccountTokens(accountId, "access_token 已过期");
+  return accountAuth.ensureFreshAccount(accountId);
 }
 
 function buildAuthUrl(redirectUri, codeChallenge, state) {
@@ -999,6 +861,24 @@ function officialCodexKeychainAccount() {
   return `cli|${sha256(resolved).slice(0, 16)}`;
 }
 
+async function loadCodexAuthBundles() {
+  const bundles = [];
+  const fileAuth = readJsonIfExists(authJsonPath(), null);
+  if (fileAuth) {
+    bundles.push({ source: "auth.json", auth: fileAuth });
+  }
+
+  const keychainSecret = await keychainRead(
+    CODEX_KEYCHAIN_SERVICE,
+    officialCodexKeychainAccount()
+  );
+  const keychainAuth = parseJsonText(keychainSecret);
+  if (keychainAuth) {
+    bundles.push({ source: "keychain", auth: keychainAuth });
+  }
+  return bundles;
+}
+
 function buildCodexAuthFile(account, tokens) {
   return {
     OPENAI_API_KEY: null,
@@ -1155,6 +1035,7 @@ async function startCodex() {
 }
 
 async function switchAccount(accountId) {
+  await accountAuth.syncCodexAuthBundleForKnownAccount();
   const { account, tokens } = await refreshStoredAccountTokens(
     accountId,
     "切换前刷新 token"

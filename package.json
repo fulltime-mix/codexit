@@ -18,10 +18,11 @@
   },
   "scripts": {
     "start": "electron .",
-    "lint": "node --check src/main.js && node --check src/preload.js && node --check src/renderer.js",
+    "lint": "node --check src/main.js && node --check src/preload.js && node --check src/renderer.js && node --check src/auth-coordinator.js && node --check test/auth-coordinator.test.js",
+    "test": "node --test",
     "smoke": "electron . --smoke-test",
     "audit": "npm audit --audit-level=high",
-    "verify": "npm run lint && npm run smoke && npm run audit",
+    "verify": "npm run lint && npm test && npm run smoke && npm run audit",
     "build": "electron-builder --mac dmg --arm64",
     "build:dir": "electron-builder --mac dir --arm64"
   },
