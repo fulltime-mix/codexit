@@ -13,5 +13,10 @@ contextBridge.exposeInMainWorld("codexit", {
     const listener = (_event, payload) => callback(payload);
     ipcRenderer.on("oauth:completed", listener);
     return () => ipcRenderer.removeListener("oauth:completed", listener);
+  },
+  onAccountsChanged: (callback) => {
+    const listener = () => callback();
+    ipcRenderer.on("accounts:changed", listener);
+    return () => ipcRenderer.removeListener("accounts:changed", listener);
   }
 });

@@ -21,6 +21,7 @@ const {
   extractIdentity,
   sha256
 } = require("./auth-coordinator");
+const { QuotaRefreshScheduler } = require("./quota-refresh-scheduler");
 
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const AUTH_ENDPOINT = "https://auth.openai.com/oauth/authorize";
@@ -124,6 +125,7 @@ app.whenReady().then(() => {
     app.dock.hide();
   }
   createTray();
+  quotaRefreshScheduler.start();
   app.on("activate", () => {
     showMainWindow();
   });
@@ -131,6 +133,7 @@ app.whenReady().then(() => {
 
 app.on("before-quit", () => {
   isQuitting = true;
+  quotaRefreshScheduler.stop();
 });
 
 app.on("window-all-closed", () => {
@@ -850,6 +853,16 @@ async function refreshQuota(accountId) {
   }
 }
 
+const quotaRefreshScheduler = new QuotaRefreshScheduler({
+  listAccounts,
+  getCurrentAccountId: () => loadStore().currentAccountId,
+  refreshQuota,
+  notifyAccountsChanged,
+  logBackgroundError: (error) => {
+    console.warn("Background quota refresh failed:", error);
+  }
+});
+
 function officialCodexKeychainAccount() {
   const home = codexHome();
   let resolved = home;
@@ -1078,6 +1091,13 @@ function truncateMenuText(value, maxLength = 72) {
   return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
 }
 
+function notifyAccountsChanged() {
+  refreshTrayMenu();
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send("accounts:changed");
+  }
+}
+
 function trayQuotaValue(account, key) {
   const windowInfo = account.quota?.[key];
   if (!windowInfo || windowInfo.remainingPercent === null) {
@@ -1125,9 +1145,10 @@ function refreshTrayMenu() {
           if (account.isCurrent) {
             return;
           }
-          runTrayTask(`正在切换到 ${account.email}...`, () =>
-            switchAccount(account.id)
-          );
+          runTrayTask(`正在切换到 ${account.email}...`, async () => {
+            await switchAccount(account.id);
+            notifyAccountsChanged();
+          });
         }
       }))
     : [
@@ -1161,9 +1182,9 @@ function refreshTrayMenu() {
     ...accountItems,
     { type: "separator" },
     {
-      label: "刷新额度",
+      label: "刷新全部额度",
       enabled: hasAccounts && !trayBusyLabel,
-      click: () => runTrayTask("正在刷新额度...", refreshAllAccountsFromTray)
+      click: () => runTrayTask("正在刷新全部额度...", refreshAllAccountsFromTray)
     },
     { type: "separator" },
     {
@@ -1204,15 +1225,7 @@ function runTrayTask(label, task) {
 }
 
 async function refreshAllAccountsFromTray() {
-  const accounts = listAccounts();
-  let failedCount = 0;
-  for (const account of accounts) {
-    try {
-      await refreshQuota(account.id);
-    } catch {
-      failedCount += 1;
-    }
-  }
+  const { failedCount } = await quotaRefreshScheduler.refreshAllAccounts();
   if (failedCount > 0) {
     throw new Error(`${failedCount} 个账号刷新失败，请打开 Codexit 查看详情`);
   }
@@ -1246,17 +1259,15 @@ ipcMain.handle("oauth:start", async () => startOAuth());
 ipcMain.handle("oauth:reauth", async (_event, accountId) => startOAuthReauth(accountId));
 ipcMain.handle("oauth:complete", async (_event, loginId) => {
   const account = await completeOAuth(loginId);
-  refreshTrayMenu();
+  notifyAccountsChanged();
   return account;
 });
 ipcMain.handle("quota:refresh", async (_event, accountId) => {
-  const quota = await refreshQuota(accountId);
-  refreshTrayMenu();
-  return quota;
+  return quotaRefreshScheduler.refreshAccount(accountId);
 });
 ipcMain.handle("account:switch", async (_event, accountId) => {
   const result = await switchAccount(accountId);
-  refreshTrayMenu();
+  notifyAccountsChanged();
   return result;
 });
 ipcMain.handle("account:delete", async (_event, accountId) => {
@@ -1267,7 +1278,7 @@ ipcMain.handle("account:delete", async (_event, accountId) => {
   }
   saveStore(store);
   await keychainDelete(ACCOUNT_TOKEN_SERVICE, accountId);
-  refreshTrayMenu();
+  notifyAccountsChanged();
   return true;
 });
 ipcMain.handle("codex:open-home", async () => openCodexHome());

@@ -18,7 +18,7 @@
   },
   "scripts": {
     "start": "electron .",
-    "lint": "node --check src/main.js && node --check src/preload.js && node --check src/renderer.js && node --check src/auth-coordinator.js && node --check test/auth-coordinator.test.js",
+    "lint": "node --check src/main.js && node --check src/preload.js && node --check src/renderer.js && node --check src/auth-coordinator.js && node --check src/quota-refresh-scheduler.js && node --check test/auth-coordinator.test.js && node --check test/quota-refresh-scheduler.test.js",
     "test": "node --test",
     "smoke": "electron . --smoke-test",
     "audit": "npm audit --audit-level=high",

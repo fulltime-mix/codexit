@@ -2,11 +2,10 @@ const state = {
   accounts: [],
   activeLoginId: null,
   reauthAccountId: null,
-  busy: false,
-  autoRefreshing: false
+  busy: false
 };
 
-const AUTO_REFRESH_INTERVAL_MS = 60 * 1000;
+const AUTO_REFRESH_SUMMARY = "自动刷新：当前 10 秒 · 全部 10 分钟";
 
 const ICONS = {
   refresh:
@@ -123,11 +122,15 @@ function quotaValue(quota, key) {
   };
 }
 
+function syncButtonState() {
+  for (const button of document.querySelectorAll("button")) {
+    button.disabled = state.busy;
+  }
+}
+
 function setBusy(busy) {
   state.busy = busy;
-  for (const button of document.querySelectorAll("button")) {
-    button.disabled = busy;
-  }
+  syncButtonState();
 }
 
 async function withBusy(message, action) {
@@ -211,18 +214,18 @@ function renderAccount(account) {
 function render() {
   const current = state.accounts.find((account) => account.isCurrent);
   const attention = state.accounts.filter((account) => formatAccountError(account)).length;
-  const intervalMinutes = Math.round(AUTO_REFRESH_INTERVAL_MS / 60000);
 
   nodes.summary.textContent =
     state.accounts.length === 0
       ? "本地账号管理器"
-      : `${state.accounts.length} 个账号 · 自动刷新 ${intervalMinutes} 分钟`;
+      : `${state.accounts.length} 个账号 · ${AUTO_REFRESH_SUMMARY}`;
   nodes.accountCount.textContent = String(state.accounts.length);
   nodes.currentAccount.textContent = current?.email || "未切换";
   nodes.attentionCount.textContent = attention > 0 ? `${attention} 个需处理` : "正常";
   nodes.emptyState.classList.toggle("hidden", state.accounts.length !== 0);
   nodes.accountList.classList.toggle("hidden", state.accounts.length === 0);
   nodes.accountList.innerHTML = state.accounts.map(renderAccount).join("");
+  syncButtonState();
 }
 
 async function loadAccounts() {
@@ -267,51 +270,6 @@ async function completeOAuth(loginId) {
       setStatus(`账号已添加，额度稍后可刷新：${formatError(error)}`);
     }
   });
-}
-
-async function refreshAccountsInBackground({ announce = false } = {}) {
-  if (state.busy || state.autoRefreshing || state.accounts.length === 0) {
-    return;
-  }
-
-  state.autoRefreshing = true;
-  const accounts = state.accounts.slice();
-  let refreshedCount = 0;
-  let failedCount = 0;
-
-  try {
-    for (const account of accounts) {
-      try {
-        await window.codexit.refreshQuota(account.id);
-        refreshedCount += 1;
-      } catch (error) {
-        failedCount += 1;
-        console.warn(`Auto refresh failed for ${account.email}:`, error);
-      }
-    }
-    if (refreshedCount > 0 || failedCount > 0) {
-      await loadAccounts();
-      if (announce && refreshedCount > 0 && nodes.statusText.textContent === "准备就绪") {
-        setStatus("额度已自动刷新。");
-      }
-    }
-  } finally {
-    state.autoRefreshing = false;
-  }
-}
-
-function startAutoRefresh() {
-  window.setTimeout(() => {
-    refreshAccountsInBackground({ announce: true }).catch((error) =>
-      console.warn("Initial auto refresh failed:", error)
-    );
-  }, 1500);
-
-  window.setInterval(() => {
-    refreshAccountsInBackground().catch((error) =>
-      console.warn("Auto refresh failed:", error)
-    );
-  }, AUTO_REFRESH_INTERVAL_MS);
 }
 
 async function refreshAccount(accountId) {
@@ -403,6 +361,10 @@ window.codexit.onOAuthCompleted(({ loginId }) => {
   completeOAuth(loginId).catch(() => {});
 });
 
-loadAccounts()
-  .then(startAutoRefresh)
-  .catch((error) => setStatus(formatError(error), true));
+window.codexit.onAccountsChanged(() => {
+  loadAccounts().catch((error) =>
+    console.warn("Account reload failed:", error)
+  );
+});
+
+loadAccounts().catch((error) => setStatus(formatError(error), true));
