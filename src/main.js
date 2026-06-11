@@ -1109,15 +1109,37 @@ function trayQuotaValue(account, key) {
   return `${remaining}%`;
 }
 
+function trayQuotaReset(account, key, type) {
+  const resetAt = account.quota?.[key]?.resetAt;
+  if (!Number.isFinite(resetAt) || resetAt <= 0) {
+    return "-";
+  }
+  const date = new Date(resetAt * 1000);
+  if (Number.isNaN(date.getTime())) {
+    return "-";
+  }
+  if (type === "date") {
+    return `${date.getMonth() + 1}月${date.getDate()}日`;
+  }
+  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(
+    2,
+    "0"
+  )}`;
+}
+
+function trayQuotaSegment(account, key, label, resetType) {
+  return `${label} ${trayQuotaValue(account, key)} · ${trayQuotaReset(account, key, resetType)}`;
+}
+
 function trayAccountSublabel(account) {
   const error = account.reauthReason || account.quotaError?.message;
   if (error) {
     return `需处理 · ${truncateMenuText(error, 44)}`;
   }
-  return `5 小时 ${trayQuotaValue(account, "fiveHour")} · 周额度 ${trayQuotaValue(
-    account,
-    "weekly"
-  )}`;
+  return [
+    trayQuotaSegment(account, "fiveHour", "5 小时", "time"),
+    trayQuotaSegment(account, "weekly", "1 周", "date")
+  ].join("    ");
 }
 
 function sortTrayAccounts(accounts) {
